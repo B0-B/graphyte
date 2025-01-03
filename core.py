@@ -1,7 +1,31 @@
 import numpy as np
 from typing import Callable
 
-def extract_node_id (node: "Node|int"):
+# ---- General Functions ----
+def equal (probe: "GraphLike|Path", compare: "GraphLike|Path") -> bool:
+
+    '''
+    Checks if probe and compare object, of same type or class, are equal by topology.
+    It works for GraphLike probes and Paths.
+    This does not compare nodes nor edges, including all properties like weights etc.
+    '''
+
+    if type(probe) != type(compare):
+        TypeError(f'Both probes must have same type, but types are {type(probe)} and {type(compare)}.')
+    if issubclass(type(probe), GraphLike):
+        return probe.node_space == compare.node_space and probe.edge_space == compare.edge_space and probe.directed == compare.directed
+    elif issubclass(type(probe), Path):
+        return probe.sequence == compare.sequence
+    
+def extract_node_id (node: "Node|int") -> int:
+
+    '''
+    Extracts the id from a node identifier which is either a Node object or int.
+
+    [Return]
+
+    node id as integer.
+    '''
 
     # determine the node ids
     if type(node) is Node:
@@ -9,15 +33,19 @@ def extract_node_id (node: "Node|int"):
     elif type(node) is int:
         return node
     else:
-        raise TypeError(f'The provided node_a must be a Node or int object, not {type(node_a)}.')
-    
+        raise TypeError(f'The provided node_a must be a Node or int object, not {type(node)}.')
+
+
+
+# ---- Graphs ----
 class Node:
 
-    def __init__(self, parent_graph: "GraphLike", id: int|None=None):
+    def __init__(self, parent_graph: "GraphLike", id: int|None=None, size: float=1.0):
         
         self.graph = parent_graph # hold corresponding graph pointer
         self.marked = False   # set marker
         self.visits: int = 0 # count visits
+        self.size: float = size # optional size parameter - useful for visualization
 
         # Node parameter
         self.assign_new_id(id) # -> assigns self.id
@@ -187,6 +215,45 @@ class ActiveNode ( Node ):
 
         super().__init__(parent_graph, id)
 
+        self.forward_action: Callable|None = None
+        self.forward_action_kwargs: dict
+
+    def forward (self, _input: "any") -> "any":
+
+        '''
+        Main forwarding function which performs the forward action.
+        If no forward action is defined this function can be considered an identical map.
+        '''
+
+        if not self.forward_action:
+            return _input
+        return self.forward_action(self, _input, **self.forward_action_kwargs)
+
+    def set_forward_action (self, callback: Callable, **kwargs) -> None:
+
+        '''
+        Sets the forward action callback. 
+        The callback function should take 2 leading positional arguments:
+
+            - node object
+            - input of any type.
+        
+        and other optional keyword arguments which should be used during inference.  
+
+        [Example]
+
+        >>> def callback (node: Node, _input: Any) -> Any:
+        >>>     ...
+        >>>     # access graph for instance
+        >>>     if node.graph.directed:
+        >>>         return node.degree() - 1
+        >>>     else:
+        >>>         return node.degree()
+        '''
+
+        self.forward_action = callback
+        self.forward_action_kwargs = kwargs
+
 class Edge:
 
     '''
@@ -200,7 +267,6 @@ class Edge:
         self.visited = False
 
         self.forward_action: Callable|None = None
-        self.forward_action_args: tuple
         self.forward_action_kwargs: dict
 
         self.directed = self.graph.directed
@@ -259,16 +325,31 @@ class Edge:
 
         if not self.forward_action:
             return _input
-        return self.forward_action(_input, *self.forward_action_args, **self.forward_action_kwargs)
+        return self.forward_action(self, _input, **self.forward_action_kwargs)
 
-    def set_forward_action (self, callback: Callable, *args, **kwargs) -> None:
+    def set_forward_action (self, callback: Callable, **kwargs) -> None:
 
         '''
-        Sets the forward action callback. The callback function should take 1 leading positional argument as the input. 
+        Sets the forward action callback. 
+        The callback function should take 2 leading positional arguments:
+
+            - node object
+            - input of any type.
+        
+        and other optional keyword arguments which should be used during inference.  
+
+        [Example]
+
+        >>> def callback (node: Node, _input: Any) -> Any:
+        >>>     ...
+        >>>     # access graph for instance
+        >>>     if node.graph.directed:
+        >>>         return node.degree() - 1
+        >>>     else:
+        >>>         return node.degree()
         '''
 
         self.forward_action = callback
-        self.forward_action_args = args
         self.forward_action_kwargs = kwargs
 
 class Path:
@@ -392,7 +473,6 @@ class Path:
             length += edge.length
         return length
 
-
 class GraphLike:
 
     '''
@@ -408,7 +488,6 @@ class GraphLike:
         # Every graph has a corresponding node space and edge space
         self.node_space: set[int] = set()
         self.edge_space: set[tuple[int]] = set() # set of all edge tuples
-        self.path_space: set[list[int]] = set()
 
         # Lookup tables with pointers to objects
         self.lookup_node: dict[int, "Node"] = dict()        # lookup map from id to Node object
@@ -469,7 +548,7 @@ class BaseGraph ( GraphLike ):
         
         return adj_dict
     
-    def adjacency_matrix (self) -> np.ndarray:
+    def adjacency_matrix (self, edge_weighting: bool=False) -> np.ndarray:
 
         '''
         Returns a square adjacency matrix.
@@ -494,7 +573,11 @@ class BaseGraph ( GraphLike ):
                 pmt = (id_j, id_i)
                 val = 0
                 if not self.directed and (tpl in self.edge_space or pmt in self.edge_space) or tpl in self.edge_space:
-                    val = 1
+                    if edge_weighting:
+                        edge = self.edge(*tpl) if tpl in self.edge_space else self.edge(*pmt)
+                        val = edge.weight
+                    else:
+                        val = self.edge(id_i, id_j) if edge_weighting else 1
                 row.append(val)
             mat.append(row)
 
@@ -648,18 +731,6 @@ class BaseGraph ( GraphLike ):
         
         return ent
 
-    def is_connected (self) -> bool:
-
-        '''
-        Checks if the graph is connected i.e. every node is connected to any other node.
-        '''
-
-        for i in self.node_space:
-            for j in self.node_space:
-                if not self.is_linked(i, j):
-                    return False
-        return True
-
     def is_linked (self, node_a: "Node|int", node_b: "Node|int") -> bool:
 
         '''
@@ -718,10 +789,10 @@ class BaseGraph ( GraphLike ):
 class PathGraph ( BaseGraph ):
     
     '''
-    Involve graph search methods, paths etc.
+    Involve graph search, paths, and connectivity methods.
     '''
 
-    def __init__ (self, name:str = 'Graph_01', directed: bool = False):
+    def __init__ (self, name: str='Graph_01', directed: bool=False):
 
         super().__init__(name, directed=directed)
 
@@ -803,6 +874,34 @@ class PathGraph ( BaseGraph ):
                 stack.pop()
 
         return self.cache
+
+    def is_connected (self) -> bool:
+
+        '''
+        Checks if the graph is connected i.e. every node is connected to any other node.
+        The algorithm compares the reachable nodes from a random pick to the whole node_space size.
+
+        [Return]
+
+        Boolean truth statement.
+        '''
+
+        # need to disable directed var for this
+        save_directed = self.directed
+        self.directed = False
+
+        # the problem is symmetric -> pick any node
+        pick = self.node(list(self.node_space)[0])
+
+        # determine the reachable set from this node
+        reachable_nodes = self.reachable_nodes( pick )
+
+        # reset directed variable
+        self.directed = save_directed
+
+        # if the set of reachable nodes and the node space set (excluding the origin) are equal in size 
+        # the graph is considered connected.
+        return len(reachable_nodes) == len(self.node_space) - 1
 
     def rdfs (self, node: "Node|int", depth: int=1) -> set[int]:
         
@@ -1112,3 +1211,23 @@ class PathGraph ( BaseGraph ):
             return None
         else:
             return set([Path(self, *p) for p in path_set])
+
+class AdvancedGraph ( PathGraph ):
+
+    def __init__(self, name: str='Graph_01', directed: bool=False):
+
+        super().__init__(name, directed)
+    
+
+
+# ---- Trees ----
+class BaseTree ( BaseGraph ):
+
+    '''
+    The BaseTree class implements a basic tree logic.
+    Trees are graphs with a hirarchy which obeys the parent and children relation.
+    '''
+
+    def __init__(self, name: str='Tree_01', directed: bool=True) -> None:
+
+        super().__init__(name, directed)
