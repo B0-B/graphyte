@@ -272,7 +272,7 @@ class ActiveNode ( Node ):
         
         return self.forward_task(self, _input, **self.forward_task_kwargs)
 
-    def set_forward_task (self, callback: Callable, **kwargs) -> None:
+    def set_forward_task (self, callback: Callable) -> None:
 
         '''
         Sets the forward task callback. 
@@ -285,35 +285,61 @@ class ActiveNode ( Node ):
 
         [Example]
 
-        >>> def callback (node: Node, _input: Any) -> Any:
-        >>>     ...
+        >>> def callback (received: ForwardObject, color_kwarg: str='red') -> ForwardObject:
+        >>>     # extract information from received ForwardObject
+        >>>     graph = received.graph
+        >>>     current_id = received.target
+        >>>     current_node = graph.node(current_id)
+        >>>     data_to_process = received.input
         >>>     # access graph for instance
-        >>>     if node.graph.directed:
-        >>>         return node.degree() - 1
+        >>>     if graph.directed:
+        >>>         color_kwarg = 'blue'
+        >>>     # extract information from the current node and add it to export data
+        >>>     export_data = self.degree() 
+        >>>     # route to the first neighbor otherwise terminate
+        >>>     if node.adjacent_nodes:
+        >>>         target = list(node.adjacent_nodes)[0]
         >>>     else:
-        >>>         return node.degree()
+        >>>         target = None
+        >>>     # return a new ForwardObject
+        >>>     return ForwardObject(graph, input=data_to_process, output=export_data, origin=current_id, target=target, color_kwarg=color_kwarg)
         '''
 
         self.forward_task = callback
-        self.forward_task_kwargs = kwargs
 
 class ForwardObject:
 
     '''
     Standard Object which is forwarded between ActiveNode pairs.
 
+    [Parameter]
+
     input :         the input which the Node task should process
+
     output :        the task output which was derived from input
-    target :        the target id of the next node to forward to
-                    if None, will terminate.
+
+    origin :        
+
+    target :        the target id of the next node to forward to.
+                    if target is None, will terminate.
+
+    kwargs :        Exported kwargs to give the next fallback.
     '''
 
-    def __init__(self, input: any, output: any, origin: int, target: int|None):
+    def __init__(self, 
+                 graph: "PathGraph", 
+                 input: any, 
+                 output: any, 
+                 origin: int|None, 
+                 target: int|None, 
+                 **kwargs):
         
+        self.graph = graph
         self.input = input
         self.output = output
         self.origin = origin
         self.target = target
+        self.kwargs = kwargs
 
 class Edge:
 
@@ -1038,8 +1064,6 @@ class PathGraph ( BaseGraph ):
             if type(node) is not ActiveNode and not skip_non_active:
                 raise TypeError('All nodes need to be an ActiveNode, otherwise use skip_non_active=True argument to skip non-active nodes.')
 
-
-
     def shortest_path_slow (self, node_a: "Node|int", node_b: "Node|int", respect_edge_length:bool=False) -> Path|None:
         
         '''
@@ -1305,26 +1329,40 @@ class AdvancedGraph ( PathGraph ):
         Returns a list of all ConnectedComponent objects for this Graph.
         '''
 
-        output_list = []
+        # flush all current components
+        self.components.clear()
 
-        search_set = self.node_space
+        output_list = [] # aggregate component objects
+        search_set = self.node_space.copy()
 
         while search_set:
-
+            print('search set', search_set)
             pointer = list(search_set)[0]
+
+            # determine the set all reachable nodes
             reach_set = self.reachable_nodes(pointer)
-            comp_set = reach_set.add(pointer)
-            output_list.append(ConnectedComponent(self, comp_set))
-            search_set.difference_update(comp_set)
+            reach_set.add(pointer)
+            # denote the connected component
+            component_set = reach_set.copy() # copy from current reach_set
+            output_list.append(ConnectedComponent(self, component_set))
+            # take the disjoint of the current search set and the component set
+            search_set.difference_update(component_set)
 
         return output_list
 
 class ConnectedComponent ( AdvancedGraph ):
 
+    '''
+    A connected component follows all rules as an AdvancedGraph, 
+    but with a pointer reference to a parent graph.
+    '''
+
     def __init__(self, parent_graph: AdvancedGraph, node_set: set[int]|list[int]):
 
+        self.parent_graph = parent_graph
         self.component_id = parent_graph.component_id_counter
 
+        # Init AdvancedGraph.
         super().__init__(name=f'{parent_graph.name}_component_{self.component_id}', directed=parent_graph.directed)
         
         # Accept te node set as new node space.
@@ -1333,12 +1371,21 @@ class ConnectedComponent ( AdvancedGraph ):
         # Copy only valid edges.
         self.edge_space = set()
         for tpl in parent_graph.edge_space:
-            if tpl[0] in self.node_space and tpl[1] in self.node_space:
+            if tpl[0] in self.node_space or tpl[1] in self.node_space:
                 self.edge_space.add(tpl)
 
         # store in parent object
-        parent_graph.components[self.id] = self
-        parent_graph.component_id_counter += 1 # increment
+        self.parent_graph.components[self.component_id] = self
+        self.parent_graph.component_id_counter += 1 # increment
+    
+    def delete (self) -> None:
+
+        '''
+        Deletes the current component from graph object.
+        '''
+
+        self.parent_graph.components.pop(self.component_id)
+        
 
 class Network ( PathGraph ):
 
