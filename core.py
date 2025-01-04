@@ -1,5 +1,7 @@
 import numpy as np
-from typing import Callable
+from typing import Callable, Iterable
+import hashlib
+import random
 
 # ---- General Functions ----
 def equal (probe: "GraphLike|Path", compare: "GraphLike|Path") -> bool:
@@ -35,17 +37,37 @@ def extract_node_id (node: "Node|int") -> int:
     else:
         raise TypeError(f'The provided node_a must be a Node or int object, not {type(node)}.')
 
+def generate_random_hash() -> str:
 
+    # Generate a random 16-byte string
+    random_bytes = bytearray(random.getrandbits(8) for _ in range(16))
+    # Create a hash object
+    hash_object = hashlib.sha256()
+    # Update the hash object with the random bytes
+    hash_object.update(random_bytes)
+    # Get the hexadecimal representation of the hash
+    random_hash = hash_object.hexdigest()
+    return random_hash
 
 # ---- Graphs ----
 class Node:
 
-    def __init__(self, parent_graph: "GraphLike", id: int|None=None, size: float=1.0):
+    def __init__(self, parent_graph: "GraphLike", id: int|None=None, size: float=1.0, **properties):
+
+        '''
+        properties :        Optional non-constrained parameters.
+                            Useful for distinguishing or classifying nodes.
+                            Ex.: Node(.., color='red')
+        '''
         
         self.graph = parent_graph # hold corresponding graph pointer
         self.marked = False   # set marker
         self.visits: int = 0 # count visits
         self.size: float = size # optional size parameter - useful for visualization
+
+        # store additional properties
+        if properties:
+            self.__dict__.update(properties)
 
         # Node parameter
         self.assign_new_id(id) # -> assigns self.id
@@ -208,31 +230,52 @@ class Node:
 class ActiveNode ( Node ):
 
     '''
-    Active nodes can perform actions.
+    Active nodes can perform tasks.
     '''
 
-    def __init__(self, parent_graph, id = None):
+    def __init__(self,  
+                 parent_graph: "GraphLike", 
+                 id: int|None=None,
+                 address: str|None=None, 
+                 size: float=1.0, 
+                 label: str|None=None, 
+                 **properties):
 
-        super().__init__(parent_graph, id)
+        super().__init__(parent_graph, id, size=size, **properties)
 
-        self.forward_action: Callable|None = None
-        self.forward_action_kwargs: dict
+        self.forward_task: Callable|None = None
+        self.forward_task_kwargs: dict
 
-    def forward (self, _input: "any") -> "any":
+        self.address: str|None = address       # if defined must be unique
+        self.label: str|None = label           # does not have to be unique
 
-        '''
-        Main forwarding function which performs the forward action.
-        If no forward action is defined this function can be considered an identical map.
-        '''
-
-        if not self.forward_action:
-            return _input
-        return self.forward_action(self, _input, **self.forward_action_kwargs)
-
-    def set_forward_action (self, callback: Callable, **kwargs) -> None:
+    def forward (self, _input: "ForwardObject") -> "ForwardObject":
 
         '''
-        Sets the forward action callback. 
+        Main forwarding function which performs the forward task.
+        If no forward task is defined this function can be considered an identical map.
+        '''
+
+        if not self.forward_task:
+
+            # Extract the input to process
+            _input = _input.input if type(_input) is ForwardObject else _input
+
+            # Determine the next target
+            if not self.adjacent_nodes:
+                target = None
+            else: 
+                # will take random neighbor if no forward task is defined
+                target = np.random.choice(list(self.adjacent_nodes))
+
+            return ForwardObject(_input, _input, self.id, target)
+        
+        return self.forward_task(self, _input, **self.forward_task_kwargs)
+
+    def set_forward_task (self, callback: Callable, **kwargs) -> None:
+
+        '''
+        Sets the forward task callback. 
         The callback function should take 2 leading positional arguments:
 
             - node object
@@ -251,8 +294,26 @@ class ActiveNode ( Node ):
         >>>         return node.degree()
         '''
 
-        self.forward_action = callback
-        self.forward_action_kwargs = kwargs
+        self.forward_task = callback
+        self.forward_task_kwargs = kwargs
+
+class ForwardObject:
+
+    '''
+    Standard Object which is forwarded between ActiveNode pairs.
+
+    input :         the input which the Node task should process
+    output :        the task output which was derived from input
+    target :        the target id of the next node to forward to
+                    if None, will terminate.
+    '''
+
+    def __init__(self, input: any, output: any, origin: int, target: int|None):
+        
+        self.input = input
+        self.output = output
+        self.origin = origin
+        self.target = target
 
 class Edge:
 
@@ -265,9 +326,6 @@ class Edge:
         self.graph = parent_graph
         self.marked = False
         self.visited = False
-
-        self.forward_action: Callable|None = None
-        self.forward_action_kwargs: dict
 
         self.directed = self.graph.directed
         self.weight = weight
@@ -299,6 +357,10 @@ class Edge:
         self.graph.lookup_edge[self.tuple] = self
     
     def delete (self) -> None:
+
+        '''
+        Deletes the edge and removes it from all graph sets.
+        '''
         
         # remove from edge space
         if self.tuple in self.graph.edge_space:
@@ -315,42 +377,6 @@ class Edge:
         # repeat with permuted tuple if the graph is not directed
         if not self.graph.directed and self.permuted in self.graph.lookup_edge:
             self.graph.lookup_edge.pop(self.permuted)
-
-    def forward (self, _input: "any") -> "any":
-
-        '''
-        Main forwarding function which performs the forward action.
-        If no forward action is defined this function can be considered an identical map.
-        '''
-
-        if not self.forward_action:
-            return _input
-        return self.forward_action(self, _input, **self.forward_action_kwargs)
-
-    def set_forward_action (self, callback: Callable, **kwargs) -> None:
-
-        '''
-        Sets the forward action callback. 
-        The callback function should take 2 leading positional arguments:
-
-            - node object
-            - input of any type.
-        
-        and other optional keyword arguments which should be used during inference.  
-
-        [Example]
-
-        >>> def callback (node: Node, _input: Any) -> Any:
-        >>>     ...
-        >>>     # access graph for instance
-        >>>     if node.graph.directed:
-        >>>         return node.degree() - 1
-        >>>     else:
-        >>>         return node.degree()
-        '''
-
-        self.forward_action = callback
-        self.forward_action_kwargs = kwargs
 
 class Path:
 
@@ -522,7 +548,7 @@ class BaseGraph ( GraphLike ):
 
         return node_a.link(node_b, weight)
 
-    def add_node (self, id: int|None=None) -> Node:
+    def add_node (self, id: int|None=None, active: bool=False) -> Node:
 
         '''
         Adds a new node to the graph.
@@ -532,6 +558,8 @@ class BaseGraph ( GraphLike ):
         id :    If int is provided it will be prioritized, otherwise will auto assign id.
         '''
 
+        if active:
+            return ActiveNode(self, id)
         return Node(self, id)
     
     def adjacency_list (self) -> dict[int, set[int]]:
@@ -763,6 +791,25 @@ class BaseGraph ( GraphLike ):
         else:
             return (node_a, node_b) in self.edge_space or (node_b, node_a) in self.edge_space
 
+    def remove_edge (self, edge: "Edge|tuple[int]") -> None:
+
+        '''
+        Secure method to remove an edge from graph.
+        '''
+
+        if type(edge) is tuple:
+            edge = self.edge(*edge)
+        edge.delete()
+
+    def remove_node (self, node: "Node|int") -> None:
+
+        '''
+        Secure method to remove node from graph.
+        '''
+
+        id = extract_node_id(node)
+        self.node(id).delete()
+
     def reset_node_labels (self) -> None:
         
         '''
@@ -789,7 +836,7 @@ class BaseGraph ( GraphLike ):
 class PathGraph ( BaseGraph ):
     
     '''
-    Involve graph search, paths, and connectivity methods.
+    Involve graph search, paths, and connectivity algorithms.
     '''
 
     def __init__ (self, name: str='Graph_01', directed: bool=False):
@@ -818,8 +865,8 @@ class PathGraph ( BaseGraph ):
     def idfs (self, node: "Node|int", stop: "Node|int|None"=None) -> set[int]:
         
         '''
-        Iterative Depth-first Search Algorithm (iDFS).
-        Compute time scales better than worst case O(|node space| + |edge space|)
+        Iterative Preorder Depth-first Search Algorithm (iDFS).
+        Computes time scales better than worst case order O(|node space| + |edge space|)
         '''
 
         id = extract_node_id(node)
@@ -968,6 +1015,30 @@ class PathGraph ( BaseGraph ):
             return self.idfs(node)
         elif algorithm == 'rdfs':
             return self.rdfs(node)
+
+    def run (self, start_node: "Node|int", skip_non_active=False, verbose: bool=False) -> None:
+
+        '''
+        Runs the directed path from node to node with internal node decision_making.
+        '''
+
+        if not self.directed:
+            ValueError('The graph needs to be directed to run it.')
+
+        start_id = extract_node_id(start_node)
+
+        print(f'Run "{self.name}" from node {start_id}:')
+
+        pointer = start_id
+
+        while True:
+
+            node = self.node(pointer)
+
+            if type(node) is not ActiveNode and not skip_non_active:
+                raise TypeError('All nodes need to be an ActiveNode, otherwise use skip_non_active=True argument to skip non-active nodes.')
+
+
 
     def shortest_path_slow (self, node_a: "Node|int", node_b: "Node|int", respect_edge_length:bool=False) -> Path|None:
         
@@ -1214,20 +1285,154 @@ class PathGraph ( BaseGraph ):
 
 class AdvancedGraph ( PathGraph ):
 
+    '''
+    Involve ConnectedComponent management and relations.
+    '''
+
     def __init__(self, name: str='Graph_01', directed: bool=False):
 
         super().__init__(name, directed)
+
+        # these variables will be adjusted automatically when 
+        # ConnectedComponent is initialized with this graph as argument.
+        self.component_id_counter = 0
+        self.components: dict[int, ConnectedComponent] = dict()
     
+    def split_into_components (self) -> list["ConnectedComponent"]:
+
+        '''
+        Splits the AdvancedGraph into multiple ConnectedComponents.
+        Returns a list of all ConnectedComponent objects for this Graph.
+        '''
+
+        output_list = []
+
+        search_set = self.node_space
+
+        while search_set:
+
+            pointer = list(search_set)[0]
+            reach_set = self.reachable_nodes(pointer)
+            comp_set = reach_set.add(pointer)
+            output_list.append(ConnectedComponent(self, comp_set))
+            search_set.difference_update(comp_set)
+
+        return output_list
+
+class ConnectedComponent ( AdvancedGraph ):
+
+    def __init__(self, parent_graph: AdvancedGraph, node_set: set[int]|list[int]):
+
+        self.component_id = parent_graph.component_id_counter
+
+        super().__init__(name=f'{parent_graph.name}_component_{self.component_id}', directed=parent_graph.directed)
+        
+        # Accept te node set as new node space.
+        self.node_space = node_set if type(node_set) is set else set(node_set)
+
+        # Copy only valid edges.
+        self.edge_space = set()
+        for tpl in parent_graph.edge_space:
+            if tpl[0] in self.node_space and tpl[1] in self.node_space:
+                self.edge_space.add(tpl)
+
+        # store in parent object
+        parent_graph.components[self.id] = self
+        parent_graph.component_id_counter += 1 # increment
+
+class Network ( PathGraph ):
+
+    '''
+    A network is generally always a connected graph. 
+    Separate nodes or disconnected components 
+    are simply not part of the network and are hence not of interest.
+    The main focus lies in finding routes, forwarding information 
+    and or executing tasks at nodes. 
+
+    Here Network is interpreted as 
+    - a PathGraph which allows to route.
+    - and contains only active nodes to execute tasks or forward.
+    - every node has a degree of >=1.
+    - nodes can disconnect with an impact on the network dynamic, 
+      then the network participants have to re-route
+    - every node has a unique address which is bijectively mapable to it's id
+      similar to a domain name space e.g. '0.0.0.0' or '4 Privet Drive, Little Whinging, Surrey'
+    - every node has a display label e.g. 'Google DNS' or 'Harry Potter'
+      the label does not have to be unique, as multiple nodes with different addresses can be under the same label.
+    '''
+
+    def __init__(self, name: str='Network_01', directed: bool=False):
+
+        super().__init__(name, directed)
+
+        self.address_space: set[str] = set()
+        # maps address to id
+        self.address_lookup: dict[str, int] = dict()
+
+    def add_node (self, id: int|None=None, address: str|None=None, label: str|None=None) -> ActiveNode:
+
+        '''
+        Adds a new node to the network.
+
+        [Parameter]
+
+        id :    If int is provided it will be prioritized, otherwise will auto assign id.
+        '''
+
+        node = ActiveNode(self, id)
+
+        # generate address and store in the node
+        if address != None and address in self.address_space:
+            raise ValueError(f'Provided address must be unique but "{address}" exists already.')
+        if address != None:
+            node.address = address
+        else:
+            node.address = self.generate_address()
+
+        # add label to node
+        node.label = label
+
+        # denote in address lookup
+        self.address_space.add(node.address)
+        self.address_lookup[node.address] = node.id
+
+        return node
+    
+    def generate_address (self) -> str:
+        
+        '''
+        Generates a unique address.
+        '''
+
+        address = generate_random_hash()
+        while address in self.address_space:
+            address = generate_random_hash()
+        
+        return address
 
 
 # ---- Trees ----
-class BaseTree ( BaseGraph ):
+class BaseTree ( GraphLike ):
 
     '''
     The BaseTree class implements a basic tree logic.
     Trees are graphs with a hirarchy which obeys the parent and children relation.
+
+    Trees are by definition
+     - connected and acyclic
+     - Removing any edge disconnects graph
+     - Adding an edge automatically creates a cycle
+
     '''
 
     def __init__(self, name: str='Tree_01', directed: bool=True) -> None:
 
         super().__init__(name, directed)
+
+
+# ---- Generation ----
+def generate_network (self, nodes: int, mean_degree: float) -> Network:
+
+    # Generate random connections using a poisson distribution.
+    np.random.poisson()
+    pass
