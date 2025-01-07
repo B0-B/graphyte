@@ -1,9 +1,9 @@
 import numpy as np
 from typing import Callable, Iterable
-import hashlib
-import random
+from core.utils import generate_random_hash
 
-# ---- General Functions ----
+
+# ---- Global Graph Functions ----
 def equal (probe: "GraphLike|Path", compare: "GraphLike|Path") -> bool:
 
     '''
@@ -36,18 +36,6 @@ def extract_node_id (node: "Node|int") -> int:
         return node
     else:
         raise TypeError(f'The provided node_a must be a Node or int object, not {type(node)}.')
-
-def generate_random_hash() -> str:
-
-    # Generate a random 16-byte string
-    random_bytes = bytearray(random.getrandbits(8) for _ in range(16))
-    # Create a hash object
-    hash_object = hashlib.sha256()
-    # Update the hash object with the random bytes
-    hash_object.update(random_bytes)
-    # Get the hexadecimal representation of the hash
-    random_hash = hash_object.hexdigest()
-    return random_hash
 
 # ---- Graphs ----
 class Node:
@@ -318,9 +306,9 @@ class ForwardObject:
 
     output :        the task output which was derived from input
 
-    origin :        
+    origin :        the origin node id which took the input and produced the output.
 
-    target :        the target id of the next node to forward to.
+    targets :        the set of target id of the next node to forward to.
                     if target is None, will terminate.
 
     kwargs :        Exported kwargs to give the next fallback.
@@ -331,14 +319,14 @@ class ForwardObject:
                  input: any, 
                  output: any, 
                  origin: int|None, 
-                 target: int|None, 
+                 targets: set[int], 
                  **kwargs):
         
         self.graph = graph
         self.input = input
         self.output = output
         self.origin = origin
-        self.target = target
+        self.targets = targets
         self.kwargs = kwargs
 
 class Edge:
@@ -555,6 +543,44 @@ class BaseGraph ( GraphLike ):
 
         super().__init__(name, directed)
 
+    def __mul__(self, other: "BaseGraph"): 
+
+        '''
+        Defines the multiplication context for tensor product 
+        between two arbitrary graphs a and b as
+
+            graph_a = BaseGraph(...)
+            graph_b = BaseGraph(...)
+            # graph tensor product
+            graph_c = graph_a * graph_b
+
+        The resulting graph will inherit the directed argument from graph_a.
+        '''
+
+        if not isinstance(other, BaseGraph): 
+            raise TypeError(f"Unsupported operand type(s) for *: 'BaseGraph' and '{type(other).__name__}'")
+
+        # create resulting matrix from the tensor product
+        result_matrix = self.adjacency_matrix() @ other.adjacency_matrix() 
+
+        # create new raw graph and add the topology from the resulting matrix
+        result_graph = BaseGraph(f'{self.name} x {other.name}', self.directed)
+        
+        # add all nodes first
+        for i in range(result_matrix.shape[0]):
+            result_graph.add_node(i)
+        
+        # secondly, add all edges according to the new result matrix
+        for i in range(result_matrix.shape[0]):
+            for j in range(result_matrix.shape[0]):
+                weight = result_matrix[i][j]
+                if not result_graph.directed and (j, i) in result_graph.edge_space:
+                    continue
+                if weight != 0:
+                    result_graph.add_edge(i, j, weight)
+
+        return result_graph
+
     def add_edge (self, node_a: "Node|int", node_b: "Node|int", weight: float|None=None) -> Edge:
 
         '''
@@ -602,7 +628,7 @@ class BaseGraph ( GraphLike ):
         
         return adj_dict
     
-    def adjacency_matrix (self, edge_weighting: bool=False) -> np.ndarray:
+    def adjacency_matrix (self, respect_edge_length: bool=False) -> np.ndarray:
 
         '''
         Returns a square adjacency matrix.
@@ -627,16 +653,46 @@ class BaseGraph ( GraphLike ):
                 pmt = (id_j, id_i)
                 val = 0
                 if not self.directed and (tpl in self.edge_space or pmt in self.edge_space) or tpl in self.edge_space:
-                    if edge_weighting:
+                    if respect_edge_length:
                         edge = self.edge(*tpl) if tpl in self.edge_space else self.edge(*pmt)
-                        val = edge.weight
+                        val = edge.length
                     else:
-                        val = self.edge(id_i, id_j) if edge_weighting else 1
+                        val = 1
                 row.append(val)
             mat.append(row)
 
         return np.array(mat)
     
+    def distance (self, node_a: "Node|int", node_b: "Node|int") -> int|None:
+
+        '''
+        Returns the shortest distance between two connected nodes
+        i.e. the number of edges that need to be crossed. If not connected
+        will return None. Works in directed and undirected graphs.
+        The distance is obtained by squaring the adjacency matrix.
+        '''
+
+        id_a = extract_node_id(node_a)
+        id_b = extract_node_id(node_b)
+
+        # derive index positions in the matrix
+        node_list = list(self.node_space)
+        ind_a = node_list.index(id_a)
+        ind_b = node_list.index(id_b)
+
+        adj_matrix = self.adjacency_matrix()
+
+        # determine the longest path
+        # the distance matrix is obtained from the 
+        # adjacency_matrix squared.
+        mat = np.identity(adj_matrix.shape[0])
+        for n in range(1, len(self.edge_space)+1):
+            mat = mat @ adj_matrix
+            if mat[ind_a][ind_b] > 0:
+                return n
+
+        return None
+
     def node (self, node_id: int) -> Node:
 
         '''
@@ -847,6 +903,30 @@ class BaseGraph ( GraphLike ):
             node.marked = False
             node.visits = 0
 
+    def spectrum (self) -> np.ndarray:
+        
+        '''
+        Returns the spectrum of an undirected graph.
+        Directed graphs hold no spectrum as their adjacency matrix is non-symmetric
+        and therefore does not have real eigenvalues.
+        The spectrum is the sorted list of the adjacency matrix eigenvalues.
+        Starting with ev_1 >= ev_2 >= ev_3 ...
+
+        [Return]
+
+        1-D Array including the eigenvalues in descending order, i.e. the first element
+        holds the largest eigenvalue.
+        '''
+        
+        if self.directed:
+            raise ValueError('Directed graphs have no spectrum as their adjacency matrix is non-symmetric.')
+
+        adj_mat = self.adjacency_matrix()
+
+        eigenvalues, _ = np.linalg.eig(adj_mat)
+        
+        return eigenvalues
+
     def total_edge_weight (self) -> int:
 
         '''
@@ -887,6 +967,213 @@ class PathGraph ( BaseGraph ):
 
         search_id = extract_node_id(node_b)
         return search_id in self.idfs(node_a, stop=search_id)
+
+    def find_all_paths (self, node_a: "Node|int", node_b: "Node|int", verbose: bool=False) -> set[Path]|None:
+
+        '''
+        Pruning search algorithm for finding all paths between two nodes, a and b.
+
+        [Parameter]
+
+        node_a :    Origin node
+
+        node_b :    Target node
+
+        [Return]
+
+        Returns a set of all unique paths between a and b.
+
+        Algorithm in Pseudo Code
+
+        0.  Initialize an array for paths:int->Path, branching:int->id, and a count map:id->count.
+            Set a pointer variable to equal the start id.
+        
+        while loop
+            
+            1.  If unknown (i.e. not in the current sequence) add the pointer to the sequence list  
+            2.  if pointer equals the target node id:
+                    - add the current sequence to paths
+                    - try to go to last id in branching array : pointer <- branching[-1]
+                      if there is none, stop the search
+                    - slice the sequence from right up to this id, but keep the id
+                    - restart loop
+            3.  Count number of possible exits at the pointer, 
+                i.e. adjacent nodes which are not in the current sequence.
+            4.  Decide on the number of exits whether:
+                the # of exits equals 0, then revert:
+                    - the pointer is a dead-end
+                    -> try to go to last id in branching array : pointer <- branching[-1]
+                    -> if there is none, stop the search:
+                            break loop
+                    -> slice the sequence from right up to this id, but keep the id
+                    -> restart loop
+                else if count equals 1:
+                    - the pointer is an intermediate node
+                    -> continue forward to the only neighbor: pointer <- neighbor
+                      which is not in sequence yet 
+                    -> restart loop
+                else if the pointer id is not in branching list:
+                    - the pointer is a new branching for this sequence 
+                    -> push the pointer into branching
+                    -> initialize a count for this branching i.e. count[pointer] -> 0
+            5.  The pointer is a branching, check if the branch provides yet undiscovered exits, 
+                otherwise break:
+                -> if count[pointer] >= length(pointer.adjacents):
+                        break loop
+                -> Otherwise, select with pointer the next undiscovered exit 
+                -> restart loop
+            6.  Branch pruning: 
+                - all exits were searched at current branch.
+                -> discard the last known branching: branching.pop()
+            7.  Revert:
+                -> try to go to last id in branching array : pointer <- branching[-1]
+                -> if there is none, stop the search:
+                        break loop
+                -> slice the sequence from right up to this id, but keep the id
+
+        8. Return the paths list.            
+        '''
+
+        # clean the state        
+        self.reset_node_labels()
+        self.cache.clear()
+
+        # extract node information
+        root_id = extract_node_id(node_a)
+        target_id = extract_node_id(node_b)
+
+        # iteration variables
+        pointer_id: int = root_id
+        pointer_node: Node = self.node(pointer_id)
+        path_set: list[list[int]] = list()
+        sequence: list[int] = list()
+        branching: list[int] = list()
+        index_count: dict[int, int] = dict()
+
+        if verbose:
+            step = 0
+
+        while True:
+
+            # if this pointer is not being observed in the sequence yet, add it
+            if pointer_id not in sequence:
+                sequence.append(pointer_id)
+
+            if verbose:
+                if step > 1000:
+                    break
+                print(f'step {step}) Current Sequence:', sequence)
+                step += 1
+
+            # Check if the target is found
+            if pointer_id == target_id:
+                print('found sequence:', sequence) if verbose else None
+                # denote the current sequence
+                path_set.append(sequence)
+                # Cut back sequence to previous branch to continue the search for other paths.
+                # Except if there are no branches left, then stop the search.
+                if not branching:
+                    break
+                # also check if the current pointer/target is a branching then pop it
+                if branching[-1] == target_id:
+                    branching.pop()
+                # finally go back to last known branching
+                pointer_id = branching[-1]
+                pointer_node = self.node(pointer_id)
+                cut_index = sequence.index(pointer_id) + 1
+                sequence = sequence[:cut_index]
+                continue
+            
+            # Count the number of exits at each node
+            exits = pointer_node.degree() # marked and unmarked exits
+            
+            # Exclude cylcing exits i.e. which lead to a node which is already in the sequence
+            if not self.directed:
+                for n in pointer_node.adjacent_nodes:
+                    if n in sequence:
+                        exits -= 1
+                        break
+
+            # Categorize the current pointer based on the number of exits:
+            if exits == 0:
+                # No exits means the pointer is a dead-end.
+                if verbose:
+                    old = pointer_id
+                # Check if there are branches left to return to
+                # otherwise we are done here.
+                if not branching:
+                    break
+                # -> return to last known branching
+                pointer_id = branching[-1]
+                pointer_node = self.node(pointer_id)
+                # Branch pruning:
+                # finally cut the sequence to last known branch
+                cut_index = sequence.index(pointer_id) + 1
+                sequence = sequence[:cut_index]
+                print(f'\t{old} is a dead-end, return back to {pointer_id}') if verbose else 0
+                continue
+            elif exits == 1:
+                # the node is just a intermediate node "which lies on a single edge"
+                # step forward by sampling a new adjacent node
+                # pointer_id = next(iter(pointer_node.adjacent_nodes)) # best way to extract the pointer from the set without copying the set
+                for sample_id in pointer_node.adjacent_nodes:
+                    if sample_id != pointer_id:
+                        pointer_id = sample_id
+                        break
+                pointer_node = self.node(pointer_id)
+                print(f'\tcontinue to {pointer_id}') if verbose else 0
+                continue
+            elif pointer_id not in branching:
+                # exits > 1 -> branching detected
+                branching.append(pointer_id) 
+                index_count[pointer_id] = 0
+                print(f'\t{pointer_id} is a new branch') if verbose else 0
+            
+            # At this point the current pointer is a branching
+            # check if the branch provides unknown exits
+            # i.e none in the sequence
+            ajacents = list(pointer_node.adjacent_nodes)
+            exit_id = None
+            while index_count[pointer_id] < len(ajacents):
+                neighbor = ajacents[index_count[pointer_id]]
+                # directly increment the counter for this branch
+                index_count[pointer_id] = index_count[pointer_id] + 1
+                if neighbor not in sequence:
+                    exit_id = neighbor
+                    break
+            if exit_id:
+                # take new exit node
+                exit_node = self.node(exit_id)
+                pointer_id = exit_id
+                pointer_node = exit_node
+                print(f'\tgo to {pointer_id} ...') if verbose else 0
+                continue
+
+            # If no exits are found i.e. all found branches led to a dead-end,
+            # the branching node itself becomes a dead-end.
+            # -> Prune the branch i.e. remove from branching list
+            print(f'\tAll exits searched at {pointer_id}, prune branch ...') if verbose else 0
+            branching.pop()
+            
+            # If there are no branches left at this point the search is finished.
+            if not branching:
+                break
+
+            # Otherwise revert to (second) last known branch 
+            print(f'\tgo back to branch {branching[-1]} ...') if verbose else 0
+            pointer_id = branching[-1]
+            pointer_node = self.node(pointer_id)
+            # -> cut the sequence to branching node
+            cut_index = sequence.index(pointer_id) + 1
+            sequence = sequence[:cut_index]
+
+        # At this point no branchings are left anymore.
+        # Check the found paths to select the shortest.
+        if len(path_set) == 0:
+            print(f'\tThere exists no path from node "{root_id}" to "{target_id}" in graph "{self.name}".') if verbose else 0
+            return None
+        else:
+            return set([Path(self, *p) for p in path_set])
 
     def idfs (self, node: "Node|int", stop: "Node|int|None"=None) -> set[int]:
         
@@ -1100,213 +1387,7 @@ class PathGraph ( BaseGraph ):
 
         return shortest
 
-    def find_all_paths (self, node_a: "Node|int", node_b: "Node|int", verbose: bool=False) -> set[Path]|None:
-
-        '''
-        Pruning search algorithm for finding all paths between two nodes, a and b.
-
-        [Parameter]
-
-        node_a :    Origin node
-
-        node_b :    Target node
-
-        [Return]
-
-        Returns a set of all unique paths between a and b.
-
-        Algorithm in Pseudo Code
-
-        0.  Initialize an array for paths:int->Path, branching:int->id, and a count map:id->count.
-            Set a pointer variable to equal the start id.
-        
-        while loop
-            
-            1.  If unknown (i.e. not in the current sequence) add the pointer to the sequence list  
-            2.  if pointer equals the target node id:
-                    - add the current sequence to paths
-                    - try to go to last id in branching array : pointer <- branching[-1]
-                      if there is none, stop the search
-                    - slice the sequence from right up to this id, but keep the id
-                    - restart loop
-            3.  Count number of possible exits at the pointer, 
-                i.e. adjacent nodes which are not in the current sequence.
-            4.  Decide on the number of exits whether:
-                the # of exits equals 0, then revert:
-                    - the pointer is a dead-end
-                    -> try to go to last id in branching array : pointer <- branching[-1]
-                    -> if there is none, stop the search:
-                            break loop
-                    -> slice the sequence from right up to this id, but keep the id
-                    -> restart loop
-                else if count equals 1:
-                    - the pointer is an intermediate node
-                    -> continue forward to the only neighbor: pointer <- neighbor
-                      which is not in sequence yet 
-                    -> restart loop
-                else if the pointer id is not in branching list:
-                    - the pointer is a new branching for this sequence 
-                    -> push the pointer into branching
-                    -> initialize a count for this branching i.e. count[pointer] -> 0
-            5.  The pointer is a branching, check if the branch provides yet undiscovered exits, 
-                otherwise break:
-                -> if count[pointer] >= length(pointer.adjacents):
-                        break loop
-                -> Otherwise, select with pointer the next undiscovered exit 
-                -> restart loop
-            6.  Branch pruning: 
-                - all exits were searched at current branch.
-                -> discard the last known branching: branching.pop()
-            7.  Revert:
-                -> try to go to last id in branching array : pointer <- branching[-1]
-                -> if there is none, stop the search:
-                        break loop
-                -> slice the sequence from right up to this id, but keep the id
-
-        8. Return the paths list.            
-        '''
-
-        # clean the state        
-        self.reset_node_labels()
-        self.cache.clear()
-
-        # extract node information
-        root_id = extract_node_id(node_a)
-        target_id = extract_node_id(node_b)
-
-        # iteration variables
-        pointer_id: int = root_id
-        pointer_node: Node = self.node(pointer_id)
-        path_set: list[list[int]] = list()
-        sequence: list[int] = list()
-        branching: list[int] = list()
-        index_count: dict[int, int] = dict()
-
-        if verbose:
-            step = 0
-
-        while True:
-
-            # if this pointer is not being observed in the sequence yet, add it
-            if pointer_id not in sequence:
-                sequence.append(pointer_id)
-
-            if verbose:
-                if step > 1000:
-                    break
-                print(f'step {step}) Current Sequence:', sequence)
-                step += 1
-
-            # Check if the target is found
-            if pointer_id == target_id:
-                print('found sequence:', sequence) if verbose else None
-                # denote the current sequence
-                path_set.append(sequence)
-                # Cut back sequence to previous branch to continue the search for other paths.
-                # Except if there are no branches left, then stop the search.
-                if not branching:
-                    break
-                # also check if the current pointer/target is a branching then pop it
-                if branching[-1] == target_id:
-                    branching.pop()
-                # finally go back to last known branching
-                pointer_id = branching[-1]
-                pointer_node = self.node(pointer_id)
-                cut_index = sequence.index(pointer_id) + 1
-                sequence = sequence[:cut_index]
-                continue
-            
-            # Count the number of exits at each node
-            exits = pointer_node.degree() # marked and unmarked exits
-            
-            # Exclude cylcing exits i.e. which lead to a node which is already in the sequence
-            if not self.directed:
-                for n in pointer_node.adjacent_nodes:
-                    if n in sequence:
-                        exits -= 1
-                        break
-
-            # Categorize the current pointer based on the number of exits:
-            if exits == 0:
-                # No exits means the pointer is a dead-end.
-                if verbose:
-                    old = pointer_id
-                # Check if there are branches left to return to
-                # otherwise we are done here.
-                if not branching:
-                    break
-                # -> return to last known branching
-                pointer_id = branching[-1]
-                pointer_node = self.node(pointer_id)
-                # Branch pruning:
-                # finally cut the sequence to last known branch
-                cut_index = sequence.index(pointer_id) + 1
-                sequence = sequence[:cut_index]
-                print(f'\t{old} is a dead-end, return back to {pointer_id}') if verbose else 0
-                continue
-            elif exits == 1:
-                # the node is just a intermediate node "which lies on a single edge"
-                # step forward by sampling a new adjacent node
-                # pointer_id = next(iter(pointer_node.adjacent_nodes)) # best way to extract the pointer from the set without copying the set
-                for sample_id in pointer_node.adjacent_nodes:
-                    if sample_id != pointer_id:
-                        pointer_id = sample_id
-                        break
-                pointer_node = self.node(pointer_id)
-                print(f'\tcontinue to {pointer_id}') if verbose else 0
-                continue
-            elif pointer_id not in branching:
-                # exits > 1 -> branching detected
-                branching.append(pointer_id) 
-                index_count[pointer_id] = 0
-                print(f'\t{pointer_id} is a new branch') if verbose else 0
-            
-            # At this point the current pointer is a branching
-            # check if the branch provides unknown exits
-            # i.e none in the sequence
-            ajacents = list(pointer_node.adjacent_nodes)
-            exit_id = None
-            while index_count[pointer_id] < len(ajacents):
-                neighbor = ajacents[index_count[pointer_id]]
-                # directly increment the counter for this branch
-                index_count[pointer_id] = index_count[pointer_id] + 1
-                if neighbor not in sequence:
-                    exit_id = neighbor
-                    break
-            if exit_id:
-                # take new exit node
-                exit_node = self.node(exit_id)
-                pointer_id = exit_id
-                pointer_node = exit_node
-                print(f'\tgo to {pointer_id} ...') if verbose else 0
-                continue
-
-            # If no exits are found i.e. all found branches led to a dead-end,
-            # the branching node itself becomes a dead-end.
-            # -> Prune the branch i.e. remove from branching list
-            print(f'\tAll exits searched at {pointer_id}, prune branch ...') if verbose else 0
-            branching.pop()
-            
-            # If there are no branches left at this point the search is finished.
-            if not branching:
-                break
-
-            # Otherwise revert to (second) last known branch 
-            print(f'\tgo back to branch {branching[-1]} ...') if verbose else 0
-            pointer_id = branching[-1]
-            pointer_node = self.node(pointer_id)
-            # -> cut the sequence to branching node
-            cut_index = sequence.index(pointer_id) + 1
-            sequence = sequence[:cut_index]
-
-        # At this point no branchings are left anymore.
-        # Check the found paths to select the shortest.
-        if len(path_set) == 0:
-            print(f'\tThere exists no path from node "{root_id}" to "{target_id}" in graph "{self.name}".') if verbose else 0
-            return None
-        else:
-            return set([Path(self, *p) for p in path_set])
-
+    
 class AdvancedGraph ( PathGraph ):
 
     '''
@@ -1336,9 +1417,8 @@ class AdvancedGraph ( PathGraph ):
         search_set = self.node_space.copy()
 
         while search_set:
-            print('search set', search_set)
+            # select next pointer in search set
             pointer = list(search_set)[0]
-
             # determine the set all reachable nodes
             reach_set = self.reachable_nodes(pointer)
             reach_set.add(pointer)
@@ -1386,7 +1466,6 @@ class ConnectedComponent ( AdvancedGraph ):
 
         self.parent_graph.components.pop(self.component_id)
         
-
 class Network ( PathGraph ):
 
     '''
@@ -1477,9 +1556,6 @@ class BaseTree ( GraphLike ):
         super().__init__(name, directed)
 
 
-# ---- Generation ----
-def generate_network (self, nodes: int, mean_degree: float) -> Network:
 
-    # Generate random connections using a poisson distribution.
-    np.random.poisson()
-    pass
+
+    
