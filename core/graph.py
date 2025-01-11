@@ -971,7 +971,9 @@ class PathGraph ( BaseGraph ):
     def find_all_paths (self, node_a: "Node|int", node_b: "Node|int", verbose: bool=False) -> set[Path]|None:
 
         '''
-        Pruning search algorithm for finding all paths between two nodes, a and b.
+        ### Branch and Prune Search
+
+        Pruning search algorithm for finding all paths between two connected nodes, a and b.
 
         [Parameter]
 
@@ -983,6 +985,8 @@ class PathGraph ( BaseGraph ):
 
         Returns a set of all unique paths between a and b.
 
+        --- 
+        
         Algorithm in Pseudo Code
 
         0.  Initialize an array for paths:int->Path, branching:int->id, and a count map:id->count.
@@ -1351,10 +1355,98 @@ class PathGraph ( BaseGraph ):
             if type(node) is not ActiveNode and not skip_non_active:
                 raise TypeError('All nodes need to be an ActiveNode, otherwise use skip_non_active=True argument to skip non-active nodes.')
 
-    def shortest_path_slow (self, node_a: "Node|int", node_b: "Node|int", respect_edge_length:bool=False) -> Path|None:
+    def shortest_path (self, node_a: "Node|int", node_b: "Node|int") -> Path:
+
+        '''
+        ### Adjacency Tree Search
+
+        An algorithm which uses the adjacency matrix to determine neighbors at specific edge depth order using mat_mul.
+        This algorithm directly determines the final depth and will search only up to final depth.
+        Hence, the approach is considered more efficient for just finding the shortest path than "branch and prune",
+        which needs to determine all paths and thus also paths of lengths > final depth.
+        However, while matrix multiplication can be efficient, it also introduces overhead, 
+        especially for large matrices. Tensor managing can is memory heavy and should therefore 
+        be considered for large graphs with large expected paths where memory management does not outweigh the benefits.
+
+        Note: this algorithm does not consider edge weights, instead it determines the shortes path by the least number of intermediate edges.
+        '''
+
+        start_id = extract_node_id(node_a)
+        target_id = extract_node_id(node_b)
+        
+        # determine the max_depth which will act as a radius or tree depth
+        # which in essence is the distance between origin and targe nodes
+        if not self.connected(node_a, node_b):
+            raise ValueError(f'There exists no path between the nodes {start_id} and {target_id}.')
+        
+        # compute the current adjacency matrix
+        adj_mat = self.adjacency_matrix()
+        mat = adj_mat.copy()
+        
+        # cache
+        sequence: list = []
+        tensors = []
+        id_list = list(self.node_space) # maps the matrix index to node id
+
+        # convert start and target node ids to matrix indices
+        start_ind = id_list.index(start_id) # convert to matrix position (row)
+        target_ind = id_list.index(target_id) # convert to matrix position (col)
+
+        # The upper bound can be set to the longest possible path that connects all N nodes.
+        # This path if it is a cycle would have N edges.
+        max_depth = len(self.node_space)
+        for _ in range(1, max_depth+1):
+            tensors.append(mat)
+            # stop if the target id is found
+            if mat[start_ind][target_ind] > 0:
+                sequence.append(target_ind)
+                break
+            # step forward to next depth - multiply current tensor with adjacency matrix
+            mat = mat @ adj_mat
+
+
+        # trace back from the target to origin
+        for depth in range(len(tensors)-1, -1, -1):
+            
+            if depth == 0:
+                sequence.append(start_ind)
+                break
+            
+            # select the depth-1 adjacency matrix, this matrix yields which nodes are depth-1 neighbors
+            tensor = tensors[depth-1]
+            # last_ind = sequence[-1]
+
+            # denote all non-zeros indices in the start/origin row.
+            # all candidates, surely lead to the start node.
+            candidates = np.where(tensor[start_ind] > 0)[0]
+            
+            # if there is only one candidate it inevitably MUST be the path to origin
+            if len(candidates) == 1:
+                sequence.append(candidates[0])
+                continue
+            
+            # otherwise check which candidate(s) is a next neighbor to the last node in sequence
+            for ind in candidates:
+                
+                # check if the first order adjacency matrix yields an edge 
+                # between previous node and current candidate
+                if adj_mat[ind][sequence[-1]] > 0:
+                    sequence.append(ind)
+                    break
+                    
+        # convert sequence to ids
+        sequence = [id_list[ind] for ind in sequence]
+        sequence.reverse()
+
+        # convert to path and return
+        return Path(self, *sequence)
+
+    def shortest_path_weighted (self, node_a: "Node|int", node_b: "Node|int", respect_edge_length:bool=False) -> Path|None:
         
         '''
-        A low-performance implementation of the shortest path method.
+        Allows to find the shortest path by cummulated path weight. If the weight is not respected every 
+        weight will be set to 1 and the algorithm becomes a direct alternative to to DFS or "adjacency tree search". 
+        If the aim is to find the shortest path this implementation performs better for shorter paths. 
 
         [Parameter]
 
@@ -1386,8 +1478,7 @@ class PathGraph ( BaseGraph ):
                 min = length
 
         return shortest
-
-    
+ 
 class AdvancedGraph ( PathGraph ):
 
     '''
