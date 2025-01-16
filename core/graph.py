@@ -1744,6 +1744,19 @@ class BaseTree ( PathGraph ):
 
     def __init__ (self, name: str='Tree_01', directed: bool=True, depth: int|None=None, degree: int|None=None) -> None:
 
+        '''
+        [Parameter]
+
+        name :          (str) Tree instance name.
+
+        directed :      (bool) if the graph is directed, default is true.
+
+        depth :         (int|None) Optional, if defined will enable auto building up to provided depth integer.
+
+        degree :        (int|None) Optional, works only if depth is defined. Will assume a constant degree 
+                        (number of children) per node.
+        '''
+
         super().__init__(name, directed)
 
         # initialize root node with id 0
@@ -1826,13 +1839,29 @@ class OrderTree ( BaseTree ):
 
     def __init__ (self, name: str='Ordered_Tree_01', directed: bool=True, depth: int|None=None, degree: int|None=None):
 
-        super().__init__(name, directed, depth, degree)
+        '''
+        [Parameter]
+
+        name :          (str) Tree instance name.
+
+        directed :      (bool) if the graph is directed, default is true.
+
+        depth :         (int|None) Optional, if defined will enable auto building up to provided depth integer.
+
+        degree :        (int|None) Optional, works only if depth is defined. Will assume a constant degree 
+                        (number of children) per node.
+        '''
+        
+        super().__init__(name, directed)
 
         self.child_list_map: dict[int, list[int]] = dict()
         # initialize root node in child map
         self.child_list_map[self.root.id] = list()
+
+        if depth:
+            self.generate(self.root.id, depth, degree)
     
-    def add_node (self, parent: ActiveNode|int, id = None, active = True):
+    def add_node (self, parent: ActiveNode|int, id: int|None=None, active: bool=True) -> ActiveNode:
 
         '''
         Extended method from super class BaseTree. 
@@ -1849,6 +1878,8 @@ class OrderTree ( BaseTree ):
         # add ordered parent-child relation in child map
         if node.id not in self.child_list_map[parent_id]:
             self.child_list_map[parent_id].append(node.id)    
+        
+        return node
 
     def children(self, node) -> list[int]:
 
@@ -1858,6 +1889,20 @@ class OrderTree ( BaseTree ):
         '''
 
         return self.child_list_map[extract_node_id(node)]
+
+    def generate (self, parent: int, depth: int, degree: int) -> None:
+        
+        '''
+        Generates a tree of fixed depth and constant degree (across all nodes) recursively.
+        '''
+
+        if depth == 0:
+            return
+        
+        for _ in range(degree):
+
+            child = self.add_node(parent)
+            self.generate(child, depth-1, degree)
 
     def permute (self, parent: ActiveNode|int, child_a: ActiveNode|int, child_b: ActiveNode|int) -> None:
 
@@ -1882,7 +1927,7 @@ class OrderTree ( BaseTree ):
         '''
 
         super().remove_node(node)
-        
+
         id = extract_node_id(node)
 
         # remove from child map
@@ -1893,3 +1938,40 @@ class OrderTree ( BaseTree ):
         parent_id = self.node(id).parent_id
         if id in self.child_list_map[parent_id]:
             self.child_list_map[parent_id].remove(id)
+    
+    def to_mermaid(self, chart_type: str='flowchart', direction: str='LR') -> str:
+
+        '''
+        Re-definition of the mermaid method from super class.
+        Generates a mermaid-compliant flow chart code for the Graph.
+
+        [Return]
+
+        Mermaid flowchart code as string.
+        '''
+
+        mermaid_wrapper = '''```mermaid\n{} {}\n{}```'''
+        mermaid_code = ''
+        
+        # Generate nodes
+        for node in self.node_space:
+            mermaid_code += f'\tid_{node}(({node}))\n'
+
+        # create edges
+        depth = 0
+        while True:
+            depth_set = self.depth_set(depth)
+            depth += 1
+            if not depth_set:
+                break
+            for parent_id in depth_set:
+                if not parent_id in self.child_list_map:
+                    continue
+                for child in self.child_list_map[parent_id]:
+                    tpl = (parent_id, child)
+                    if self.directed:
+                        mermaid_code += f'\tid_{tpl[0]} --> id_{tpl[1]}\n'
+                    else:
+                        mermaid_code += f'\tid_{tpl[0]} --- id_{tpl[1]}\n'
+            
+        return mermaid_wrapper.format(chart_type, direction.upper(), mermaid_code)
