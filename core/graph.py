@@ -4,21 +4,6 @@ from core.utils import generate_random_hash
 
 
 # ---- Global Graph Functions ----
-def equal (probe: "GraphLike|Path", compare: "GraphLike|Path") -> bool:
-
-    '''
-    Checks if probe and compare object, of same type or class, are equal by topology.
-    It works for GraphLike probes and Paths.
-    This does not compare nodes nor edges, including all properties like weights etc.
-    '''
-
-    if type(probe) != type(compare):
-        TypeError(f'Both probes must have same type, but types are {type(probe)} and {type(compare)}.')
-    if issubclass(type(probe), GraphLike):
-        return probe.node_space == compare.node_space and probe.edge_space == compare.edge_space and probe.directed == compare.directed
-    elif issubclass(type(probe), Path):
-        return probe.sequence == compare.sequence
-    
 def extract_node_id (node: "Node|int") -> int:
 
     '''
@@ -30,12 +15,35 @@ def extract_node_id (node: "Node|int") -> int:
     '''
 
     # determine the node ids
-    if type(node) is Node:
+    if inherits_from(node, Node):
         return node.id
     elif type(node) is int:
         return node
     else:
-        raise TypeError(f'The provided node_a must be a Node or int object, not {type(node)}.')
+        raise TypeError(f'The provided node_a must be of type Node or int object, not {type(node)}.')
+
+def inherits_from (object_or_class: any, class_type: type) -> bool:
+
+    '''
+    Checks if a provided object or class (type-like) inherits from another class or type.
+    e.g. PathGraph, and the instance G = PathGraph(...) both inherit from GraphLike and BaseGraph.
+
+    [Parameter]
+
+    object_or_class :       the class or type to probe
+
+    class_type :            provided super class of the potential probe class 
+
+    [Return]
+
+    Boolean condition 
+    '''
+
+    if type(object_or_class) == type:
+        return issubclass(object_or_class, class_type)
+    else:
+        return isinstance(object_or_class, class_type)
+
 
 # ---- Graphs ----
 class Node:
@@ -663,6 +671,18 @@ class BaseGraph ( GraphLike ):
 
         return np.array(mat)
     
+    def connect_sequence (self, *nodes: "Node|int") -> None:
+
+        '''
+        Connects nodes in a sequence with edges.
+        '''
+
+        for i in range(len(nodes)-1):
+            id = extract_node_id(nodes[i])
+            id_adj = extract_node_id(nodes[i+1])
+            if (id, id_adj) not in self.edge_space:
+                self.add_edge(id, id_adj)
+
     def distance (self, node_a: "Node|int", node_b: "Node|int") -> int|None:
 
         '''
@@ -926,6 +946,32 @@ class BaseGraph ( GraphLike ):
         eigenvalues, _ = np.linalg.eig(adj_mat)
         
         return eigenvalues
+
+    def to_mermaid (self, chart_type: str='flowchart', direction: str='LR') -> str:
+
+        '''
+        Generates a mermaid-compliant flow chart code for the Graph.
+
+        [Return]
+
+        Mermaid flowchart code as string.
+        '''
+
+        mermaid_wrapper = '''```mermaid\n{} {}\n{}```'''
+        mermaid_code = ''
+        
+        # Generate nodes
+        for node in self.node_space:
+            mermaid_code += f'\tid_{node}(({node}))\n'
+
+        # create edges
+        for tpl in self.edge_space:
+            if self.directed:
+                mermaid_code += f'\tid_{tpl[0]} --> id_{tpl[1]}\n'
+            else:
+                mermaid_code += f'\tid_{tpl[0]} --- id_{tpl[1]}\n'
+
+        return mermaid_wrapper.format(chart_type, direction.upper(), mermaid_code)
 
     def total_edge_weight (self) -> int:
 
@@ -1469,7 +1515,7 @@ class PathGraph ( BaseGraph ):
 
         return self.ats(node_a, node_b)
 
-    def shortest_path (self, node_a: "Node|int", node_b: "Node|int", respect_edge_length:bool=False) -> Path|None:
+    def shortest_path (self, node_a: "Node|int", node_b: "Node|int", respect_edge_length:bool=False, verbose: bool=False) -> Path|None:
         
         '''
         Allows to find the shortest path by cummulated path.length. If the length is not respected every 
@@ -1489,7 +1535,7 @@ class PathGraph ( BaseGraph ):
         '''
 
         # First find all paths.
-        paths = self.find_all_paths(node_a, node_b)
+        paths = self.find_all_paths(node_a, node_b, verbose)
 
         if not paths:
             return None
@@ -1508,7 +1554,7 @@ class PathGraph ( BaseGraph ):
 
         return shortest
  
-class AdvancedGraph ( PathGraph ):
+class ComponentGraph ( PathGraph ):
 
     '''
     Involve ConnectedComponent management and relations.
@@ -1526,7 +1572,7 @@ class AdvancedGraph ( PathGraph ):
     def split_into_components (self) -> list["ConnectedComponent"]:
 
         '''
-        Splits the AdvancedGraph into multiple ConnectedComponents.
+        Splits the ComponentGraph into multiple ConnectedComponents.
         Returns a list of all ConnectedComponent objects for this Graph.
         '''
 
@@ -1550,19 +1596,19 @@ class AdvancedGraph ( PathGraph ):
 
         return output_list
 
-class ConnectedComponent ( AdvancedGraph ):
+class ConnectedComponent ( PathGraph ):
 
     '''
-    A connected component follows all rules as an AdvancedGraph, 
-    but with a pointer reference to a parent graph.
+    A connected component follows all rules as PathGraph in which all nodes are connected, 
+    but with a pointer reference to a parent component graph.
     '''
 
-    def __init__(self, parent_graph: AdvancedGraph, node_set: set[int]|list[int]):
+    def __init__(self, parent_graph: ComponentGraph, node_set: set[int]|list[int]):
 
         self.parent_graph = parent_graph
         self.component_id = parent_graph.component_id_counter
 
-        # Init AdvancedGraph.
+        # Init ComponentGraph.
         super().__init__(name=f'{parent_graph.name}_component_{self.component_id}', directed=parent_graph.directed)
         
         # Accept te node set as new node space.
@@ -1656,9 +1702,33 @@ class Network ( PathGraph ):
         
         return address
 
+# ---- Graph Operations ----
+def canon (graph: GraphLike) -> GraphLike:
+
+    id_list = list(graph.node_space)
+
+    # create a degree sorted map D: id -> k, where k is the degree.
+    degree_map: dict = dict()
+    for id in id_list:
+        degree_map[id] = graph.lookup_node[id].degree()
+    sorted_degree_map = {k: v for k, v in sorted(degree_map.items(), key=lambda item: item[1])}
+    
+    # re-label the ids
+    new_id = 1
+    for id, deg in sorted_degree_map.items():
+        # exchange the edges
+        for i in range(len(graph.edge_space)):
+            tpl = graph.edge_space[i]
+            if tpl[0] == id:
+                tpl[0] = new_id
+            elif tpl[1] == id:
+                tpl[1] = new_id
+            graph.edge_space[i] = 1
+
+
 
 # ---- Trees ----
-class BaseTree ( GraphLike ):
+class BaseTree ( PathGraph ):
 
     '''
     The BaseTree class implements a basic tree logic.
@@ -1666,16 +1736,160 @@ class BaseTree ( GraphLike ):
 
     Trees are by definition
      - connected and acyclic
-     - Removing any edge disconnects graph
-     - Adding an edge automatically creates a cycle
+     - contain directed path logic
+     - Removing any edge disconnects the graph
+     - Adding only an edge automatically creates a cycle
 
     '''
 
-    def __init__(self, name: str='Tree_01', directed: bool=True) -> None:
+    def __init__ (self, name: str='Tree_01', directed: bool=True, depth: int|None=None, degree: int|None=None) -> None:
 
         super().__init__(name, directed)
 
+        # initialize root node with id 0
+        self.root = super().add_node(0, active=True)
 
+        if depth:
+            self.generate(self.root, depth, degree if degree else 2)
 
+    def add_node (self, parent: ActiveNode|int, id: "any|None"=None, active: bool=True) -> ActiveNode:
 
+        '''
+        Modified add_node method which links the created nodes to parent node.
+        This method automatically creates an edge from parent to child.
+        '''
+
+        parent_id = extract_node_id(parent)
+        if not parent_id in self.node_space:
+            raise ValueError(f'No parent node "{parent_id}" found.')
+        # use inherited method
+        node = super().add_node(id, active)
+        # denote parent
+        node.parent_id = parent_id 
+        # add directed edge
+        self.add_edge(parent_id, node.id)
+
+        return node
     
+    def children (self, node: ActiveNode|int) -> set[int]:
+
+        '''
+        Alias for adjacent nodes.
+        '''
+
+        return node.adjacent_nodes
+    
+    def generate (self, parent: int, depth: int, degree: int) -> None:
+        
+        '''
+        Generates a tree of fixed depth and constant degree (across all nodes) recursively.
+        '''
+
+        if depth == 0:
+            return
+        
+        for _ in range(degree):
+            child = self.add_node(parent)
+            self.generate(child, depth-1, degree)
+
+    def depth_set (self, depth: int) -> set[int]:
+        
+        '''
+        Returns all nodes at a specified depth.
+        '''
+
+        if depth == 0:
+            return {0}
+
+        adj_mat = self.adjacency_matrix()
+        depth_adj_mat = adj_mat.copy()
+
+        # compute the depth-order adjacency matrix
+        # i.e. depth-many tensor products
+        for _ in range(depth-1):
+            depth_adj_mat = depth_adj_mat @ adj_mat
+
+        # get indices which are ids
+        index_array = []
+        for i in range(len(depth_adj_mat[0])):
+            if depth_adj_mat[0][i] > 0:
+                index_array.append(i)
+
+        return set(index_array)
+
+class OrderTree ( BaseTree ):
+
+    '''
+    An ordered tree implementation.
+    Child order matters and is additionally tracked in lists.
+    '''
+
+    def __init__ (self, name: str='Ordered_Tree_01', directed: bool=True, depth: int|None=None, degree: int|None=None):
+
+        super().__init__(name, directed, depth, degree)
+
+        self.child_list_map: dict[int, list[int]] = dict()
+        # initialize root node in child map
+        self.child_list_map[self.root.id] = list()
+    
+    def add_node (self, parent: ActiveNode|int, id = None, active = True):
+
+        '''
+        Extended method from super class BaseTree. 
+        Same as BaseTree.add_node but adds the created node to parent child list in child map.
+        '''
+        
+        node = super().add_node(parent, id, active)
+        parent_id = extract_node_id(parent)
+
+        # add parent in child map if not exists
+        if not parent_id in self.child_list_map:
+            self.child_list_map[parent_id] = list()
+
+        # add ordered parent-child relation in child map
+        if node.id not in self.child_list_map[parent_id]:
+            self.child_list_map[parent_id].append(node.id)    
+
+    def children(self, node) -> list[int]:
+
+        '''
+        Overrided children method -> differs from BaseTree super class.
+        Children in ordered context return a list of child ids.
+        '''
+
+        return self.child_list_map[extract_node_id(node)]
+
+    def permute (self, parent: ActiveNode|int, child_a: ActiveNode|int, child_b: ActiveNode|int) -> None:
+
+        '''
+        Exchanges the order of child a and b in parent child map.
+        '''
+
+        id_a = extract_node_id(child_a)
+        id_b = extract_node_id(child_b)
+
+        ind_a = self.child_list_map[parent].index(id_a)
+        ind_b = self.child_list_map[parent].index(id_b)
+
+        self.child_list_map[parent][ind_a] = id_b
+        self.child_list_map[parent][ind_b] = id_a
+
+    def remove_node (self, node: "Node|int") -> None:
+
+        '''
+        Extended method from super class BaseTree. 
+        Same as BaseTree.remove_node but removes the node from parent child list in child map.
+        '''
+
+        super().remove_node(node)
+        
+        id = extract_node_id(node)
+
+        # remove from child map
+        if id in self.child_list_map:
+            self.child_list_map.pop(id)
+        
+        # removing the connection from the parent list
+        parent_id = self.node(id).parent_id
+        if id in self.child_list_map[parent_id]:
+            self.child_list_map[parent_id].remove(id)
