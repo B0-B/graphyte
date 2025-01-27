@@ -44,6 +44,17 @@ def inherits_from (object_or_class: any, class_type: type) -> bool:
     else:
         return isinstance(object_or_class, class_type)
 
+def sorted_degree_map (graph: "GraphLike", *ids: int) -> dict[int, int]:
+
+    '''
+    Returns a dictionary map with id to degree, sorted by degree.
+    '''
+    
+    degree_map: dict = dict()
+    for id in ids:
+        degree_map[id] = graph.lookup_node[id].degree()
+    return {k: v for k, v in sorted(degree_map.items(), key=lambda item: item[1])}
+
 
 # ---- Graphs ----
 class Node:
@@ -56,6 +67,8 @@ class Node:
                             Ex.: Node(.., color='red')
         '''
         
+        self.parent_id = None # optional parent pointer
+
         self.graph = parent_graph # hold corresponding graph pointer
         self.marked = False   # set marker
         self.visits: int = 0 # count visits
@@ -245,6 +258,9 @@ class ActiveNode ( Node ):
         self.address: str|None = address       # if defined must be unique
         self.label: str|None = label           # does not have to be unique
 
+        self.inputs: list["any"] = []          # for aggregating multiple inputs
+        self.output: "any|None" = None
+
     def forward (self, _input: "ForwardObject") -> "ForwardObject":
 
         '''
@@ -256,17 +272,24 @@ class ActiveNode ( Node ):
 
             # Extract the input to process
             _input = _input.input if type(_input) is ForwardObject else _input
+            self.inputs.append(_input)
 
             # Determine the next target
             if not self.adjacent_nodes:
                 target = None
             else: 
                 # will take random neighbor if no forward task is defined
-                target = np.random.choice(list(self.adjacent_nodes))
+                target = {np.random.choice(list(self.adjacent_nodes))}
 
-            return ForwardObject(_input, _input, self.id, target)
+            fwd_obj = ForwardObject(_input, _input, self.id, target)
         
-        return self.forward_task(self, _input, **self.forward_task_kwargs)
+        else:
+
+            fwd_obj = self.forward_task(self, _input, **self.forward_task_kwargs)
+        
+        self.output = fwd_obj.input
+
+        return fwd_obj
 
     def set_forward_task (self, callback: Callable) -> None:
 
@@ -912,7 +935,7 @@ class BaseGraph ( GraphLike ):
         id = extract_node_id(node)
         self.node(id).delete()
 
-    def reset_node_labels (self) -> None:
+    def reset_node_flags (self) -> None:
         
         '''
         Resets all labels of all nodes like node.marker and node.visits.
@@ -1017,6 +1040,12 @@ class PathGraph ( BaseGraph ):
         be considered for large graphs with large expected paths where memory management does not outweigh the benefits.
 
         Note: this algorithm does not consider edge weights, instead it determines the shortes path by the least number of intermediate edges.
+        
+        [Parameter]
+
+        node_a :    Origin node
+
+        node_b :    Target node
         '''
 
         start_id = extract_node_id(node_a)
@@ -1160,7 +1189,7 @@ class PathGraph ( BaseGraph ):
         '''
 
         # clean the state        
-        self.reset_node_labels()
+        self.reset_node_flags()
         self.cache.clear()
 
         # extract node information
@@ -1316,6 +1345,90 @@ class PathGraph ( BaseGraph ):
         search_id = extract_node_id(node_b)
         return search_id in self.idfs(node_a, stop=search_id)
 
+    def dijkstra (self, node_a: "Node|int", node_b: "Node|int") -> Path:
+
+        '''
+        ### Dijkstra Algorithm Implementation
+
+        An Algorithm for finding the shortest path between arbitrary node pairs in a weighted graph.  
+        If the edges were weighted by edge.length instead of edge.weight, edge.length will be
+        used automatically.
+
+        [Parameter]
+
+        node_a :    Origin node
+
+        node_b :    Target node
+        '''
+
+        id_a = extract_node_id(node_a)
+        id_b = extract_node_id(node_b)
+
+        # 0. Initialize all nodes as undiscovered (unvisited set)
+        unvisited = self.node_space.copy()
+
+        # 1. Create a distance map
+        distance = dict()
+        for id in self.node_space:
+            if id == id_a:
+                distance[id] = 0
+                continue
+            distance[id] = np.inf
+        prev = dict()
+
+        while unvisited:
+
+            # 3. Select the current node with shortest distance to the start node.
+            current_id = min(unvisited, key=distance.get)
+            
+            # print(distance)
+            # if the minimum distance node has infinite distance,
+            # there is no finite distance node left -> terminate
+            if distance[current_id] == np.inf:
+                break
+            # Also terminate if the current node is the target node
+            elif current_id == id_b:
+                break
+
+            # 4. Find unvisited neighbours
+            current_node = self.node(current_id)
+            unvisited.remove(current_id)
+
+            for neighbour in current_node.adjacent_nodes:
+
+                if not neighbour in unvisited:
+                    continue
+                
+                # retrieve edge
+                edge = self.edge(current_id, neighbour)
+
+                # pick weight if it was explicitely set, otherwise default to length of edge
+                new_dist = distance[current_id]
+                if edge.weight:
+                    new_dist += edge.weight
+                else:
+                    new_dist += edge.length
+                
+                # update if the newly found distance is smaller
+                old_dist = distance[neighbour]
+                if new_dist < old_dist:
+                    distance[neighbour] = new_dist
+                    prev[neighbour] = current_id
+        
+        # find shortest path by reverse iteration
+        shortest = []
+        u = id_b
+        if u in prev or u == id_a:
+            while True:
+                shortest.append(u)
+                if u not in prev:
+                    break
+                u = prev[u]
+        shortest.reverse()
+        
+        # Return the shortest path as Path instance
+        return Path(self, *shortest)
+
     def find_all_paths (self, node_a: "Node|int", node_b: "Node|int", verbose: bool=False) -> set[Path]|None:
 
         '''
@@ -1341,7 +1454,7 @@ class PathGraph ( BaseGraph ):
         node = self.node(id)
 
         # reset former node labels
-        self.reset_node_labels()
+        self.reset_node_flags()
         self.cache.clear()
 
         # label the first node as discovered by marking it
@@ -1441,7 +1554,7 @@ class PathGraph ( BaseGraph ):
         # In the first run remember to reset all node labels.
         if depth == 1:
             self.cache.clear()
-            self.reset_node_labels()
+            self.reset_node_flags()
             # extract the node for this run
             id = extract_node_id(node) # convert the first time to id
         else:
@@ -1708,22 +1821,51 @@ def canon (graph: GraphLike) -> GraphLike:
     id_list = list(graph.node_space)
 
     # create a degree sorted map D: id -> k, where k is the degree.
-    degree_map: dict = dict()
-    for id in id_list:
-        degree_map[id] = graph.lookup_node[id].degree()
-    sorted_degree_map = {k: v for k, v in sorted(degree_map.items(), key=lambda item: item[1])}
+    degree_map = sorted_degree_map(graph, *id_list)
     
-    # re-label the ids
-    new_id = 1
-    for id, deg in sorted_degree_map.items():
-        # exchange the edges
-        for i in range(len(graph.edge_space)):
-            tpl = graph.edge_space[i]
-            if tpl[0] == id:
-                tpl[0] = new_id
-            elif tpl[1] == id:
-                tpl[1] = new_id
-            graph.edge_space[i] = 1
+    # root id is the id with highest degree
+    max_deg = list(degree_map.keys())[-1]
+    degeneration = list(degree_map.values()).count(max_deg)
+
+    root_id_list = list(degree_map.keys())[-degeneration:]
+
+    trees = []
+    parent = None
+    
+    for root_id in root_id_list:
+
+        # initialize an ordered tree
+        ot = OrderTree(directed=True, root_id=root_id)
+
+        # initialize stack with 1st order children
+        # stack = list(graph.lookup_node[root_id].adjacent_nodes)
+        stack = [root_id]
+
+        # work down the stack
+        while stack:
+
+            parent = stack.pop()
+            
+            # check if discovered already then break
+            if graph.lookup_node[parent].marked:
+                break
+            graph.lookup_node[parent].marked = True
+
+            children = graph.lookup_node[parent].adjacent_nodes
+
+            children_degree_sorted = sorted_degree_map(graph, *children)
+
+            for node in children_degree_sorted:
+                
+                if graph.lookup_node[node].marked:
+                    continue
+                    
+                stack.insert(0, node)
+                ot.add_node(parent, node, True)
+        
+        trees.append(ot)
+    
+    return trees
 
 
 
@@ -1742,7 +1884,12 @@ class BaseTree ( PathGraph ):
 
     '''
 
-    def __init__ (self, name: str='Tree_01', directed: bool=True, depth: int|None=None, degree: int|None=None) -> None:
+    def __init__ (self, 
+                  name: str='Tree_01', 
+                  directed: bool=True, 
+                  depth: int|None=None, 
+                  degree: int|None=None,
+                  root_id: int=0) -> None:
 
         '''
         [Parameter]
@@ -1760,7 +1907,7 @@ class BaseTree ( PathGraph ):
         super().__init__(name, directed)
 
         # initialize root node with id 0
-        self.root = super().add_node(0, active=True)
+        self.root = super().add_node(root_id, active=True)
 
         if depth:
             self.generate(self.root, depth, degree if degree else 2)
@@ -1812,7 +1959,7 @@ class BaseTree ( PathGraph ):
         '''
 
         if depth == 0:
-            return {0}
+            return {self.root.id}
 
         adj_mat = self.adjacency_matrix()
         depth_adj_mat = adj_mat.copy()
@@ -1822,11 +1969,12 @@ class BaseTree ( PathGraph ):
         for _ in range(depth-1):
             depth_adj_mat = depth_adj_mat @ adj_mat
 
-        # get indices which are ids
+        # get indices, and convert to node id
+        node_list = list(self.node_space)
         index_array = []
         for i in range(len(depth_adj_mat[0])):
             if depth_adj_mat[0][i] > 0:
-                index_array.append(i)
+                index_array.append(node_list[i])
 
         return set(index_array)
 
@@ -1837,7 +1985,12 @@ class OrderTree ( BaseTree ):
     Child order matters and is additionally tracked in lists.
     '''
 
-    def __init__ (self, name: str='Ordered_Tree_01', directed: bool=True, depth: int|None=None, degree: int|None=None):
+    def __init__ (self, 
+                  name: str='Ordered_Tree_01', 
+                  directed: bool=True, 
+                  depth: int|None=None, 
+                  degree: int|None=None,
+                  root_id: int=0) -> None:
 
         '''
         [Parameter]
@@ -1852,9 +2005,10 @@ class OrderTree ( BaseTree ):
                         (number of children) per node.
         '''
         
-        super().__init__(name, directed)
+        super().__init__(name, directed, root_id=root_id)
 
         self.child_list_map: dict[int, list[int]] = dict()
+
         # initialize root node in child map
         self.child_list_map[self.root.id] = list()
 
@@ -1878,7 +2032,7 @@ class OrderTree ( BaseTree ):
         # add ordered parent-child relation in child map
         if node.id not in self.child_list_map[parent_id]:
             self.child_list_map[parent_id].append(node.id)    
-        
+
         return node
 
     def children(self, node) -> list[int]:
@@ -1939,7 +2093,7 @@ class OrderTree ( BaseTree ):
         if id in self.child_list_map[parent_id]:
             self.child_list_map[parent_id].remove(id)
     
-    def to_mermaid(self, chart_type: str='flowchart', direction: str='LR') -> str:
+    def to_mermaid(self, chart_type: str='flowchart', direction: str='TB') -> str:
 
         '''
         Re-definition of the mermaid method from super class.
@@ -1958,20 +2112,26 @@ class OrderTree ( BaseTree ):
             mermaid_code += f'\tid_{node}(({node}))\n'
 
         # create edges
-        depth = 0
+        depth = 1
         while True:
             depth_set = self.depth_set(depth)
+            print('depth set', depth_set)
             depth += 1
             if not depth_set:
                 break
+            for child in depth_set:
+                parent_id = self.node(child).parent_id
+                if self.directed:
+                    mermaid_code += f'\tid_{parent_id} --> id_{child}\n'
+                elif child != parent_id:
+                    mermaid_code += f'\tid_{parent_id} --- id_{child}\n'
             for parent_id in depth_set:
-                if not parent_id in self.child_list_map:
+                if not parent_id in self.child_list_map or not self.child_list_map[parent_id]:
                     continue
-                for child in self.child_list_map[parent_id]:
-                    tpl = (parent_id, child)
+                for child in self.children(parent_id):
                     if self.directed:
-                        mermaid_code += f'\tid_{tpl[0]} --> id_{tpl[1]}\n'
-                    else:
-                        mermaid_code += f'\tid_{tpl[0]} --- id_{tpl[1]}\n'
+                        mermaid_code += f'\tid_{parent_id} --> id_{child}\n'
+                    elif child != parent_id:
+                        mermaid_code += f'\tid_{parent_id} --- id_{child}\n'
             
         return mermaid_wrapper.format(chart_type, direction.upper(), mermaid_code)
