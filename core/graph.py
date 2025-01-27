@@ -59,7 +59,12 @@ def sorted_degree_map (graph: "GraphLike", *ids: int) -> dict[int, int]:
 # ---- Graphs ----
 class Node:
 
-    def __init__(self, parent_graph: "GraphLike", id: int|None=None, size: float=1.0, **properties):
+    def __init__(self, 
+                 parent_graph: "GraphLike", 
+                 id: int|None=None, 
+                 size: float=1.0, 
+                 label: str|None=None,
+                 **properties):
 
         '''
         properties :        Optional non-constrained parameters.
@@ -67,12 +72,13 @@ class Node:
                             Ex.: Node(.., color='red')
         '''
         
-        self.parent_id = None # optional parent pointer
+        self.parent_id = None # optional parent pointer (useful in trees)
 
         self.graph = parent_graph # hold corresponding graph pointer
         self.marked = False   # set marker
         self.visits: int = 0 # count visits
         self.size: float = size # optional size parameter - useful for visualization
+        self.label: str|None = label # does not have to be unique
 
         # store additional properties
         if properties:
@@ -250,13 +256,12 @@ class ActiveNode ( Node ):
                  label: str|None=None, 
                  **properties):
 
-        super().__init__(parent_graph, id, size=size, **properties)
+        super().__init__(parent_graph, id, size=size, label=label, **properties)
 
         self.forward_task: Callable|None = None
         self.forward_task_kwargs: dict
 
         self.address: str|None = address       # if defined must be unique
-        self.label: str|None = label           # does not have to be unique
 
         self.inputs: list["any"] = []          # for aggregating multiple inputs
         self.output: "any|None" = None
@@ -1969,14 +1974,16 @@ class BaseTree ( PathGraph ):
         for _ in range(depth-1):
             depth_adj_mat = depth_adj_mat @ adj_mat
 
-        # get indices, and convert to node id
+        # get all indices of non-zero entries, convert to node id
+        # and finally append to the id array:
         node_list = list(self.node_space)
-        index_array = []
+        root_index = node_list.index(self.root.id)
+        id_array = []
         for i in range(len(depth_adj_mat[0])):
-            if depth_adj_mat[0][i] > 0:
-                index_array.append(node_list[i])
+            if depth_adj_mat[root_index][i] > 0:
+                id_array.append(node_list[i])
 
-        return set(index_array)
+        return set(id_array)
 
 class OrderTree ( BaseTree ):
 
@@ -2058,15 +2065,23 @@ class OrderTree ( BaseTree ):
             child = self.add_node(parent)
             self.generate(child, depth-1, degree)
 
-    def permute (self, parent: ActiveNode|int, child_a: ActiveNode|int, child_b: ActiveNode|int) -> None:
+    def permute (self, child_a: ActiveNode|int, child_b: ActiveNode|int) -> None:
 
         '''
         Exchanges the order of child a and b in parent child map.
+        Both nodes need to have Node.parent_id attribute defined
+        and should share the same parent node i.e. same depth.
         '''
 
         id_a = extract_node_id(child_a)
         id_b = extract_node_id(child_b)
 
+        parent = child_a.parent_id
+        if not parent or not child_b.parent_id:
+            AttributeError(f'Both nodes {id_a} and {id_b} need to have a parent, please make sure that node.parent_id is defined for both nodes.')
+        if parent != child_b.parent_id:
+            AttributeError(f'The nodes {id_a} and {id_b} need to have the same parent to be permutable!')
+        
         ind_a = self.child_list_map[parent].index(id_a)
         ind_b = self.child_list_map[parent].index(id_b)
 
@@ -2108,23 +2123,18 @@ class OrderTree ( BaseTree ):
         mermaid_code = ''
         
         # Generate nodes
-        for node in self.node_space:
-            mermaid_code += f'\tid_{node}(({node}))\n'
+        for id in self.node_space:
+            node = self.node(id)
+            label = node.label if node.label else id
+            mermaid_code += f'\tid_{id}(({label}))\n'
 
         # create edges
-        depth = 1
+        depth = 0
         while True:
             depth_set = self.depth_set(depth)
-            print('depth set', depth_set)
             depth += 1
             if not depth_set:
                 break
-            for child in depth_set:
-                parent_id = self.node(child).parent_id
-                if self.directed:
-                    mermaid_code += f'\tid_{parent_id} --> id_{child}\n'
-                elif child != parent_id:
-                    mermaid_code += f'\tid_{parent_id} --- id_{child}\n'
             for parent_id in depth_set:
                 if not parent_id in self.child_list_map or not self.child_list_map[parent_id]:
                     continue
