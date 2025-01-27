@@ -989,8 +989,10 @@ class BaseGraph ( GraphLike ):
         mermaid_code = ''
         
         # Generate nodes
-        for node in self.node_space:
-            mermaid_code += f'\tid_{node}(({node}))\n'
+        for id in self.node_space:
+            node = self.node(id)
+            label = node.label if node.label else id
+            mermaid_code += f'\tid_{id}(({label}))\n'
 
         # create edges
         for tpl in self.edge_space:
