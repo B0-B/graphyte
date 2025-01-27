@@ -2078,10 +2078,13 @@ class OrderTree ( BaseTree ):
         id_a = extract_node_id(child_a)
         id_b = extract_node_id(child_b)
 
-        parent = child_a.parent_id
-        if not parent or not child_b.parent_id:
+        node_a = self.node(id_a)
+        node_b = self.node(id_b)
+
+        parent = node_a.parent_id
+        if not parent or not node_b.parent_id:
             AttributeError(f'Both nodes {id_a} and {id_b} need to have a parent, please make sure that node.parent_id is defined for both nodes.')
-        if parent != child_b.parent_id:
+        if parent != node_b.parent_id:
             AttributeError(f'The nodes {id_a} and {id_b} need to have the same parent to be permutable!')
         
         ind_a = self.child_list_map[parent].index(id_a)
@@ -2123,12 +2126,6 @@ class OrderTree ( BaseTree ):
 
         mermaid_wrapper = '''```mermaid\n{} {}\n{}```'''
         mermaid_code = ''
-        
-        # Generate nodes
-        for id in self.node_space:
-            node = self.node(id)
-            label = node.label if node.label else id
-            mermaid_code += f'\tid_{id}(({label}))\n'
 
         # create edges
         depth = 0
@@ -2140,10 +2137,14 @@ class OrderTree ( BaseTree ):
             for parent_id in depth_set:
                 if not parent_id in self.child_list_map or not self.child_list_map[parent_id]:
                     continue
+                # define parent label
+                parent_node = self.node(parent_id)
+                parent_label = parent_node.label if parent_node.label else parent_id
+                # iterate through ordered children list
                 for child in self.children(parent_id):
-                    if self.directed:
-                        mermaid_code += f'\tid_{parent_id} --> id_{child}\n'
-                    elif child != parent_id:
-                        mermaid_code += f'\tid_{parent_id} --- id_{child}\n'
-            
+                    # define child label
+                    child_node = self.node(child)
+                    child_label = child_node.label if child_node.label else child
+                    connector = '-->' if self.directed else '---'
+                    mermaid_code += f'\tid_{parent_id}(({parent_label})){connector}id_{child}(({child_label}));\n'
         return mermaid_wrapper.format(chart_type, direction.upper(), mermaid_code)
